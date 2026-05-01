@@ -1,0 +1,31 @@
+{
+  "name": "me.avatwin.sdk",
+  "version": "1.1.4",
+  "displayName": "Ava-Twin SDK",
+  "description": "Load and display customized 3D avatars from Ava-Twin.me in your Unity project.",
+  "unity": "2021.3",
+  "keywords": [
+    "avatar",
+    "3d",
+    "character",
+    "customizer",
+    "glb",
+    "multiplayer",
+    "webgl"
+  ],
+  "author": {
+    "name": "Ava-Twin",
+    "url": "https://ava-twin.me"
+  },
+  "dependencies": {
+    "com.unity.cloud.gltfast": "5.0.4",
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  },
+  "samples": [
+    {
+      "displayName": "Demo Scene",
+      "description": "A working example with Customize button, avatar spawning, and third-person movement.",
+      "path": "Samples~/Demo"
+    }
+  ]
+}
