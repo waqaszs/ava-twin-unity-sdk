@@ -1,0 +1,30 @@
+{
+    "name": "AvaTwin.Editor",
+    "rootNamespace": "AvaTwin.Editor",
+    "references": ["AvaTwin.Scripts"],
+    "includePlatforms": ["Editor"],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.cloud.gltfast",
+            "expression": "",
+            "define": "AVATWIN_HAS_GLTFAST"
+        },
+        {
+            "name": "com.unity.nuget.newtonsoft-json",
+            "expression": "",
+            "define": "AVATWIN_HAS_NEWTONSOFT"
+        },
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "",
+            "define": "AVATWIN_HAS_INPUTSYSTEM"
+        }
+    ],
+    "noEngineReferences": false
+}

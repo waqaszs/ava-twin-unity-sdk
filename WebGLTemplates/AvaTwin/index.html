@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>{{{ PRODUCT_NAME }}}</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #unity-container { width: 100%; height: 100%; }
+    #unity-canvas { width: 100%; height: 100%; background: #000; }
+    #unity-loading-bar { display: none; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    #unity-progress-bar-empty { width: 200px; height: 4px; background: #333; border-radius: 2px; }
+    #unity-progress-bar-full { width: 0%; height: 100%; background: #BC75FF; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div id="unity-container">
+    <canvas id="unity-canvas" tabindex="-1"></canvas>
+    <div id="unity-loading-bar">
+      <div id="unity-progress-bar-empty">
+        <div id="unity-progress-bar-full"></div>
+      </div>
+    </div>
+  </div>
+  <script src="{{{ LOADER_FILENAME }}}"></script>
+  <script>
+    var unityInstance = null;
+    createUnityInstance(document.querySelector("#unity-canvas"), {
+      dataUrl: "{{{ DATA_FILENAME }}}",
+      frameworkUrl: "{{{ FRAMEWORK_FILENAME }}}",
+#if USE_WASM
+      codeUrl: "{{{ CODE_FILENAME }}}",
+#endif
+#if MEMORY_FILENAME
+      memoryUrl: "{{{ MEMORY_FILENAME }}}",
+#endif
+#if SYMBOLS_FILENAME
+      symbolsUrl: "{{{ SYMBOLS_FILENAME }}}",
+#endif
+      streamingAssetsUrl: "StreamingAssets",
+      companyName: "{{{ COMPANY_NAME }}}",
+      productName: "{{{ PRODUCT_NAME }}}",
+      productVersion: "{{{ PRODUCT_VERSION }}}",
+    }, function(progress) {
+      var bar = document.querySelector("#unity-progress-bar-full");
+      if (bar) bar.style.width = (100 * progress) + "%";
+      if (progress >= 1) {
+        var loadingBar = document.querySelector("#unity-loading-bar");
+        if (loadingBar) loadingBar.style.display = "none";
+      }
+    }).then(function(instance) {
+      // CRITICAL: Expose unityInstance globally for Ava-Twin postMessage bridge
+      unityInstance = instance;
+      document.querySelector("#unity-loading-bar").style.display = "none";
+    }).catch(function(message) {
+      alert(message);
+    });
+  </script>
+</body>
+</html>
