@@ -9,10 +9,13 @@ namespace AvaTwin
 {
 public class AvaTwinMobileCustomizer : MonoBehaviour
 {
+    private const string GenderCategory = "gender";
     private const string HeadCategory = "head";
     private const string TopCategory = "top";
     private const string BottomCategory = "bottom";
     private const string ShoesCategory = "shoes";
+    private const string MaleGender = "male";
+    private const string FemaleGender = "female";
 
     private static readonly string[] AllCategories = { HeadCategory, TopCategory, BottomCategory, ShoesCategory };
 
@@ -97,6 +100,10 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
     private readonly Dictionary<string, string> _selectedByCategory = new Dictionary<string, string>();
     private readonly Dictionary<string, List<AvaVariationButton>> _buttonsByCategory = new Dictionary<string, List<AvaVariationButton>>();
     private readonly Dictionary<string, List<AvatarVariation>> _variationsByCategory = new Dictionary<string, List<AvatarVariation>>();
+    private readonly Dictionary<string, string> _variationGenderById = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, Dictionary<string, List<AvatarVariation>>> _libraryByGender;
+    private Button _runtimeGenderTabButton;
+    private string _presentationGender = MaleGender;
     private string _activeCategory;
     private bool _isDragging;
     private float _lastDragX;
@@ -241,10 +248,11 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
             var library = await _api.GetLibraryAsync();
 
             if (library?.library == null || !library.library.ContainsKey("generic"))
-                throw new Exception("Library missing generic data");
+                throw new Exception("Library missing legacy generic data");
 
-            var generic = library.library["generic"];
-            LogGenericCategories(generic);
+            _libraryByGender = library.library;
+            IndexVariationGenders(_libraryByGender);
+            LogLibraryCategories(_libraryByGender);
 
             // Web-parity: before category build picks first-library-item
             // defaults, try to restore previously-saved selections for this
@@ -252,9 +260,11 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
             // are still missing, so seeded values survive.
             await TryRestoreSavedSelectionsAsync();
 
-            // Build variation data for all categories
-            foreach (var cat in AllCategories)
-                BuildCategoryData(generic, cat);
+            if (_presentationGender == FemaleGender && !HasCompleteFamily(FemaleGender))
+                _presentationGender = MaleGender;
+
+            BuildGenderCategoryData();
+            RebuildPieceCategoryData(preserveSelections: true);
 
             BuildSkinToneUI();
             WireCategoryTabs();
@@ -347,11 +357,9 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
         }
     }
 
-    private void BuildCategoryData(
-        Dictionary<string, List<AvatarVariation>> generic,
-        string categoryKey)
+    private void BuildCategoryData(List<AvatarVariation> items, string categoryKey)
     {
-        if (!generic.TryGetValue(categoryKey, out var items) || items == null || items.Count == 0)
+        if (items == null || items.Count == 0)
             return;
 
         var orderedItems = items
@@ -365,6 +373,151 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
 
         _variationsByCategory[categoryKey] = orderedItems;
         EnsureValidSelection(categoryKey, orderedItems);
+    }
+
+    private void IndexVariationGenders(
+        Dictionary<string, Dictionary<string, List<AvatarVariation>>> library)
+    {
+        _variationGenderById.Clear();
+        if (library == null)
+            return;
+
+        foreach (var genderEntry in library)
+        {
+            if (genderEntry.Value == null)
+                continue;
+
+            foreach (var categoryEntry in genderEntry.Value)
+            {
+                if (categoryEntry.Value == null)
+                    continue;
+
+                foreach (var item in categoryEntry.Value)
+                {
+                    if (item != null && !string.IsNullOrWhiteSpace(item.variationId))
+                        _variationGenderById[item.variationId] = genderEntry.Key;
+                }
+            }
+        }
+    }
+
+    private List<AvatarVariation> GetPresentationItems(string presentationGender, string categoryKey)
+    {
+        var result = new List<AvatarVariation>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        Action<string> appendGender = storedGender =>
+        {
+            Dictionary<string, List<AvatarVariation>> categories;
+            List<AvatarVariation> items;
+            if (_libraryByGender == null ||
+                !_libraryByGender.TryGetValue(storedGender, out categories) ||
+                categories == null ||
+                !categories.TryGetValue(categoryKey, out items) ||
+                items == null)
+                return;
+
+            foreach (var item in items)
+            {
+                if (item != null && !string.IsNullOrWhiteSpace(item.variationId) && seen.Add(item.variationId))
+                    result.Add(item);
+            }
+        };
+
+        if (string.Equals(presentationGender, FemaleGender, StringComparison.OrdinalIgnoreCase))
+        {
+            appendGender(FemaleGender);
+        }
+        else
+        {
+            // Legacy generic pieces remain immutable but are presented as Male.
+            // Future canonical male pieces are appended without changing old IDs.
+            appendGender("generic");
+            appendGender(MaleGender);
+        }
+
+        return result;
+    }
+
+    private bool HasCompleteFamily(string presentationGender)
+    {
+        return AllCategories.All(category =>
+            GetPresentationItems(presentationGender, category).Count > 0);
+    }
+
+    private void BuildGenderCategoryData()
+    {
+        var genders = new List<AvatarVariation>
+        {
+            new AvatarVariation { variationId = MaleGender, displayName = "Male", sortOrder = 0 }
+        };
+        if (HasCompleteFamily(FemaleGender))
+            genders.Add(new AvatarVariation { variationId = FemaleGender, displayName = "Female", sortOrder = 1 });
+
+        _variationsByCategory[GenderCategory] = genders;
+        _selectedByCategory[GenderCategory] = _presentationGender;
+    }
+
+    private void RebuildPieceCategoryData(bool preserveSelections)
+    {
+        foreach (var category in AllCategories)
+        {
+            _variationsByCategory.Remove(category);
+            if (!preserveSelections)
+                _selectedByCategory.Remove(category);
+            BuildCategoryData(GetPresentationItems(_presentationGender, category), category);
+        }
+
+        _selectedByCategory[GenderCategory] = _presentationGender;
+        if (_isDefaultSkinToneSelected)
+            _selectedSkinToneHex = GetDefaultSkinToneForSelectedHead();
+    }
+
+    private string GetGenderThumbnailVariationId(string presentationGender)
+    {
+        return GetPresentationItems(presentationGender, HeadCategory)
+            .Select(item => item.variationId)
+            .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
+    }
+
+    private void ApplyPresentationGender(string presentationGender)
+    {
+        var normalized = string.Equals(presentationGender, FemaleGender, StringComparison.OrdinalIgnoreCase)
+            ? FemaleGender
+            : MaleGender;
+        if (normalized == _presentationGender)
+            return;
+        if (normalized == FemaleGender && !HasCompleteFamily(FemaleGender))
+            return;
+
+        _presentationGender = normalized;
+        _selectedByCategory[GenderCategory] = normalized;
+        RebuildPieceCategoryData(preserveSelections: false);
+        RefreshSelectionVisuals(GenderCategory);
+        RefreshSkinToneSelectionVisuals();
+
+        var loader = GetOrFindCharacterLoader();
+        if (loader != null)
+            loader.SetSkinToneHex(_selectedSkinToneHex);
+        if (livePreviewOnSelection)
+            RequestPreviewLoad();
+    }
+
+    private string GetPersistedGender()
+    {
+        if (_presentationGender == FemaleGender)
+            return FemaleGender;
+
+        foreach (var category in AllCategories)
+        {
+            string selectedId;
+            string storedGender;
+            if (_selectedByCategory.TryGetValue(category, out selectedId) &&
+                _variationGenderById.TryGetValue(selectedId, out storedGender) &&
+                string.Equals(storedGender, MaleGender, StringComparison.OrdinalIgnoreCase))
+                return MaleGender;
+        }
+        return "generic";
     }
 
     private void ShowCategory(string categoryKey)
@@ -382,7 +535,13 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
             return;
 
         // Track thumbnail loading — show loading if thumbnails aren't cached
-        int uncachedCount = items.Count(item => !_thumbCache.ContainsKey(item.variationId));
+        int uncachedCount = items.Count(item =>
+        {
+            var thumbnailId = categoryKey == GenderCategory
+                ? GetGenderThumbnailVariationId(item.variationId)
+                : item.variationId;
+            return !string.IsNullOrWhiteSpace(thumbnailId) && !_thumbCache.ContainsKey(thumbnailId);
+        });
         _pendingThumbnails = uncachedCount;
         if (uncachedCount > 0)
             SetLoadingVisible(true);
@@ -396,6 +555,12 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
 
             button.Bind(item, null, variationId =>
             {
+                if (categoryKey == GenderCategory)
+                {
+                    ApplyPresentationGender(variationId);
+                    return;
+                }
+
                 _selectedByCategory[categoryKey] = variationId;
                 RefreshSelectionVisuals(categoryKey);
 
@@ -414,7 +579,13 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
                     RequestPreviewLoad();
             });
 
-            _ = LoadAndApplyThumbnailAsync(button, item.variationId);
+            var thumbnailVariationId = categoryKey == GenderCategory
+                ? GetGenderThumbnailVariationId(item.variationId)
+                : item.variationId;
+            if (!string.IsNullOrWhiteSpace(thumbnailVariationId))
+                _ = LoadAndApplyThumbnailAsync(button, thumbnailVariationId);
+            if (categoryKey == GenderCategory)
+                AddGenderOptionLabel(button, item.displayName);
         }
 
         _buttonsByCategory[categoryKey] = buttons;
@@ -422,8 +593,10 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
 
         // Move camera to matching focus point
         var cameraController = GetOrFindPreviewCameraController();
-        if (cameraController != null)
+        if (cameraController != null && categoryKey != GenderCategory)
             cameraController.TransitionToCategory(categoryKey);
+
+        RefreshTabSelectionVisuals();
 
         // Rebuild parent layout after runtime button instantiation.
         RequestLayoutRefresh();
@@ -431,6 +604,7 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
 
     private void WireCategoryTabs()
     {
+        EnsureRuntimeGenderTab();
         if (headTabButton != null)
             headTabButton.onClick.AddListener(() => ShowCategory(HeadCategory));
         if (topTabButton != null)
@@ -439,6 +613,104 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
             bottomTabButton.onClick.AddListener(() => ShowCategory(BottomCategory));
         if (shoesTabButton != null)
             shoesTabButton.onClick.AddListener(() => ShowCategory(ShoesCategory));
+    }
+
+    private void EnsureRuntimeGenderTab()
+    {
+        if (_runtimeGenderTabButton != null || headTabButton == null || headTabButton.transform.parent == null)
+            return;
+
+        _runtimeGenderTabButton = Instantiate(headTabButton, headTabButton.transform.parent);
+        _runtimeGenderTabButton.name = "Gender";
+        _runtimeGenderTabButton.transform.SetSiblingIndex(headTabButton.transform.GetSiblingIndex());
+        _runtimeGenderTabButton.onClick = new Button.ButtonClickedEvent();
+        _runtimeGenderTabButton.onClick.AddListener(ShowGenderVariations);
+
+        foreach (var image in _runtimeGenderTabButton.GetComponentsInChildren<Image>(true))
+        {
+            if (image.gameObject != _runtimeGenderTabButton.gameObject && image.gameObject.name != "Selected")
+                image.enabled = false;
+        }
+
+        var labelObject = new GameObject("GenderLabel", typeof(RectTransform), typeof(CanvasRenderer), typeof(Text));
+        labelObject.transform.SetParent(_runtimeGenderTabButton.transform, false);
+        var rect = labelObject.GetComponent<RectTransform>();
+        rect.anchorMin = Vector2.zero;
+        rect.anchorMax = Vector2.one;
+        rect.offsetMin = Vector2.zero;
+        rect.offsetMax = Vector2.zero;
+        var label = labelObject.GetComponent<Text>();
+        label.text = "M/F";
+        label.alignment = TextAnchor.MiddleCenter;
+        label.color = Color.white;
+        label.fontSize = 16;
+        label.font = FindExistingUiFont(_runtimeGenderTabButton);
+        label.raycastTarget = false;
+    }
+
+    private static void AddGenderOptionLabel(AvaVariationButton button, string value)
+    {
+        if (button == null)
+            return;
+
+        var labelObject = new GameObject("GenderLabel", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        labelObject.transform.SetParent(button.transform, false);
+        var rect = labelObject.GetComponent<RectTransform>();
+        rect.anchorMin = new Vector2(0f, 0f);
+        rect.anchorMax = new Vector2(1f, 0f);
+        rect.pivot = new Vector2(0.5f, 0f);
+        rect.offsetMin = Vector2.zero;
+        rect.offsetMax = new Vector2(0f, 28f);
+        var background = labelObject.GetComponent<Image>();
+        background.color = new Color(0f, 0f, 0f, 0.68f);
+        background.raycastTarget = false;
+
+        var textObject = new GameObject("Text", typeof(RectTransform), typeof(CanvasRenderer), typeof(Text));
+        textObject.transform.SetParent(labelObject.transform, false);
+        var textRect = textObject.GetComponent<RectTransform>();
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.offsetMin = Vector2.zero;
+        textRect.offsetMax = Vector2.zero;
+        var text = textObject.GetComponent<Text>();
+        text.text = value;
+        text.alignment = TextAnchor.MiddleCenter;
+        text.color = Color.white;
+        text.fontSize = 14;
+        text.font = FindExistingUiFont(button);
+        text.raycastTarget = false;
+    }
+
+    private static Font FindExistingUiFont(Component context)
+    {
+        if (context == null)
+            return null;
+        var canvas = context.GetComponentInParent<Canvas>();
+        var texts = canvas != null
+            ? canvas.GetComponentsInChildren<Text>(true)
+            : context.GetComponentsInChildren<Text>(true);
+        return texts
+            .Where(candidate => candidate != null && candidate.font != null)
+            .Select(candidate => candidate.font)
+            .FirstOrDefault();
+    }
+
+    private void RefreshTabSelectionVisuals()
+    {
+        SetTabSelected(_runtimeGenderTabButton, _activeCategory == GenderCategory);
+        SetTabSelected(headTabButton, _activeCategory == HeadCategory);
+        SetTabSelected(topTabButton, _activeCategory == TopCategory);
+        SetTabSelected(bottomTabButton, _activeCategory == BottomCategory);
+        SetTabSelected(shoesTabButton, _activeCategory == ShoesCategory);
+    }
+
+    private static void SetTabSelected(Button button, bool selected)
+    {
+        if (button == null)
+            return;
+        var selectedTransform = button.transform.Find("Selected");
+        if (selectedTransform != null)
+            selectedTransform.gameObject.SetActive(selected);
     }
 
     private async Task<Texture2D> GetThumb(string variationId)
@@ -589,6 +861,10 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
             var sel = record?.variation_selections;
             if (sel == null) return;
 
+            _presentationGender = string.Equals(sel.gender, FemaleGender, StringComparison.OrdinalIgnoreCase)
+                ? FemaleGender
+                : MaleGender;
+
             if (!string.IsNullOrEmpty(sel.head))   _selectedByCategory[HeadCategory]   = sel.head;
             if (!string.IsNullOrEmpty(sel.top))    _selectedByCategory[TopCategory]    = sel.top;
             if (!string.IsNullOrEmpty(sel.bottom)) _selectedByCategory[BottomCategory] = sel.bottom;
@@ -628,7 +904,7 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
 
             var selections = new VariationSelections
             {
-                gender = "generic",
+                gender = GetPersistedGender(),
                 head = head,
                 top = top,
                 bottom = bottom,
@@ -662,7 +938,7 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
             return null;
         }
 
-        var response = await _api.SdkAvatarSaveAsync("generic", head, top, bottom, shoes, _selectedSkinToneHex);
+        var response = await _api.SdkAvatarSaveAsync(GetPersistedGender(), head, top, bottom, shoes, _selectedSkinToneHex);
 
         if (response == null || !response.success || string.IsNullOrEmpty(response.avatar_id))
         {
@@ -880,14 +1156,16 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
         }
     }
 
+    public void ShowGenderVariations() => ShowCategory(GenderCategory);
     public void ShowHeadVariations() => ShowCategory(HeadCategory);
     public void ShowTopVariations() => ShowCategory(TopCategory);
     public void ShowBottomVariations() => ShowCategory(BottomCategory);
     public void ShowShoesVariations() => ShowCategory(ShoesCategory);
 
-    private void LogGenericCategories(Dictionary<string, List<AvatarVariation>> generic)
+    private void LogLibraryCategories(
+        Dictionary<string, Dictionary<string, List<AvatarVariation>>> library)
     {
-        if (!logReceivedCategories || generic == null)
+        if (!logReceivedCategories || library == null)
             return;
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -895,8 +1173,11 @@ public class AvaTwinMobileCustomizer : MonoBehaviour
 #endif
 
         string[] skinKeys = { "skin", "skin_tone", "skintone", "tone" };
-        var foundSkinKey = generic.Keys.FirstOrDefault(key =>
-            skinKeys.Any(match => key.IndexOf(match, StringComparison.OrdinalIgnoreCase) >= 0));
+        var foundSkinKey = library.Values
+            .Where(categories => categories != null)
+            .SelectMany(categories => categories.Keys)
+            .FirstOrDefault(key => skinKeys.Any(match =>
+                key.IndexOf(match, StringComparison.OrdinalIgnoreCase) >= 0));
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         if (!string.IsNullOrWhiteSpace(foundSkinKey))

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-06
+
+### Added
+- The native Android/iOS customizer now presents Male and Female avatar families. Existing
+  `generic` avatars remain immutable and appear under Male; new canonical `male` items are merged
+  into that presentation, while canonical `female` items remain isolated.
+
+### Compatibility
+- Existing generic selections continue to save as `generic`. Female selections save as `female`,
+  and previously saved generic, male, or female recipes restore into the matching presentation.
+
 ### Server-side change (no SDK API change)
 - The Ava-Twin server now enforces per-platform identifier registration. Register your origin (WebGL) or bundle ID (native) in the [Console](https://console.ava-twin.me) before deploying. See README "Register Your Build Identifiers" for details.
 
