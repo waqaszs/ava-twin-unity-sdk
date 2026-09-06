@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-06
+
 ### Added
 - The native Android/iOS customizer now presents Male and Female avatar families. Existing
   `generic` avatars remain immutable and appear under Male; new canonical `male` items are merged
