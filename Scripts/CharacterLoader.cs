@@ -41,8 +41,9 @@ public sealed class CharacterLoader : MonoBehaviour
 
     // ── Caching ──────────────────────────────────────────────────────
     [Header("Caching")]
+    [Tooltip("Cache downloaded characters on the device. Ava-Twin avatars use the shared persistent cache (see AvatarPipeline.PersistentCacheEnabled); the TTL settings below apply only to other URLs.")]
     [SerializeField] private bool useCache = true;
-    [Tooltip("How long a cached character stays valid (minutes).")]
+    [Tooltip("How long a cached non-Ava-Twin character stays valid (minutes).")]
     [SerializeField] private float cacheTtlMinutes = 60f;
     [Tooltip("If true, using the cache refreshes its TTL (sliding expiration).")]
     [SerializeField] private bool refreshTtlOnUse = true;
@@ -231,18 +232,37 @@ public sealed class CharacterLoader : MonoBehaviour
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
 
-        // Try disk cache first
+        // Try disk cache first. Ava-Twin storage objects are immutable, so they use the
+        // shared persistent cache (no expiry, validated, LRU-capped). This URL may come from
+        // outside the SDK (e.g. another player), so a disk hit is used only after Storage
+        // verifies the signed URL. Any other URL keeps the TTL cache below, because its
+        // content may change.
+        var sourceUrl = glbUrl;
+        var isAvaTwinObject = AvatarDiskCache.IsAvaTwinStorageUrl(sourceUrl);
+        var assetKey = useCache && isAvaTwinObject && AvatarPipeline.PersistentCacheEnabled
+            ? AvatarDiskCache.AssetKeyFromUrl(sourceUrl)
+            : null;
+        var useTtlCache = useCache && !isAvaTwinObject;
+        var cacheGeneration = AvatarDiskCache.Generation;
+
         byte[] glbBytes = null;
-        if (useCache)
+        if (assetKey != null)
         {
-            glbBytes = TryLoadCachedBytes(glbUrl);
+            glbBytes = await AvatarPipeline.TryLoadVerifiedAsync(sourceUrl);
+            if (token.IsCancellationRequested) return null;
+        }
+        else if (useTtlCache)
+        {
+            glbBytes = TryLoadCachedBytes(sourceUrl);
         }
 
+        var downloaded = false;
         if (glbBytes == null)
         {
             try
             {
-                glbBytes = await AvatarPipeline.DownloadGlbAsync(glbUrl, token);
+                glbBytes = await AvatarPipeline.DownloadGlbAsync(sourceUrl, token);
+                downloaded = true;
             }
             catch (OperationCanceledException)
             {
@@ -256,9 +276,9 @@ public sealed class CharacterLoader : MonoBehaviour
                 return null;
             }
 
-            if (useCache)
+            if (useTtlCache)
             {
-                TrySaveCachedBytes(glbUrl, glbBytes);
+                TrySaveCachedBytes(sourceUrl, glbBytes);
             }
         }
 
@@ -280,6 +300,12 @@ public sealed class CharacterLoader : MonoBehaviour
             Debug.LogError("[Ava-Twin] Failed to load/instantiate GLB data.");
             CharacterLoadFailed?.Invoke(msg);
             return null;
+        }
+
+        // Persist only bytes that imported successfully. Best-effort, not awaited.
+        if (downloaded && assetKey != null)
+        {
+            _ = AvatarDiskCache.SaveAsync(assetKey, glbBytes, AvatarPipeline.PersistentCacheMaxBytes, cacheGeneration);
         }
 
         // Destroy old instance

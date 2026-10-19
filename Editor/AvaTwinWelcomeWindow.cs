@@ -9,7 +9,8 @@ namespace AvaTwin.Editor
     public class AvaTwinWelcomeWindow : EditorWindow
     {
         private const string ShownForVersionPref = "AvaTwin_ShownForVersion";
-        private const string SdkVersion = "1.0.0";
+        // Used only when the SDK runs from its source project rather than as a package.
+        private const string FallbackSdkVersion = "1.2.1";
         private const string CredentialsAssetPath = "Assets/Resources/Credentials.asset";
         private const string ConfigAssetPath = "Assets/Resources/AvaTwinConfig.asset";
         private const string DocsUrl = "https://ava-twin.me/docs/unity-sdk";
@@ -18,6 +19,18 @@ namespace AvaTwin.Editor
         private const string KevinIglesiasUrl = "https://assetstore.unity.com/publishers/36307";
         private const string DefaultBaseUrl = "https://customizer.ava-twin.me";
         private const string BaseUrlOverridePref = "AvaTwin_BaseUrlOverride";
+
+        /// <summary>Installed package version, read from the package manifest.</summary>
+        private static string SdkVersion =>
+            UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(AvaTwinWelcomeWindow).Assembly)?.version
+            ?? FallbackSdkVersion;
+
+        private static bool IsNewer(string candidate, string installed)
+        {
+            if (System.Version.TryParse(candidate, out var a) && System.Version.TryParse(installed, out var b))
+                return a > b;
+            return string.Compare(candidate, installed, System.StringComparison.Ordinal) > 0;
+        }
 
         private string appId = string.Empty;
         private string apiKey = string.Empty;
@@ -193,7 +206,7 @@ namespace AvaTwin.Editor
                     return;
                 }
 
-                if (string.Compare(latestVersion, SdkVersion, System.StringComparison.Ordinal) > 0)
+                if (IsNewer(latestVersion, SdkVersion))
                 {
                     bool update = EditorUtility.DisplayDialog("Ava-Twin SDK — Update Available",
                         $"A newer version is available!\n\n" +

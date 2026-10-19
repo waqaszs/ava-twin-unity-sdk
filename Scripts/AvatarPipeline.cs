@@ -85,12 +85,57 @@ namespace AvaTwin
             }
         }
 
-        private static void CacheGlb(string avatarId, byte[] bytes)
+        /// <summary>Returns true when this call added the entry.</summary>
+        private static bool CacheGlb(string avatarId, byte[] bytes)
         {
             lock (CacheLock)
             {
-                if (!GlbCache.ContainsKey(avatarId) && bytes != null && bytes.Length > 0)
-                    GlbCache[avatarId] = bytes;
+                if (GlbCache.ContainsKey(avatarId) || bytes == null || bytes.Length == 0)
+                    return false;
+                GlbCache[avatarId] = bytes;
+                return true;
+            }
+        }
+
+        internal static void ClearMemoryCache()
+        {
+            lock (CacheLock)
+            {
+                GlbCache.Clear();
+            }
+        }
+
+        // ── Persistent (on-device) GLB cache ────────────────────────────
+        /// <summary>
+        /// Keep downloaded avatars on the device so later app launches reuse them
+        /// instead of downloading the GLB again. avatar-resolve is still called on
+        /// every load, so plan and access checks keep applying. Default true.
+        /// Applies to SDK.LoadAvatar and to CharacterLoader (web and mobile customizer).
+        /// </summary>
+        public static bool PersistentCacheEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Disk budget for persisted avatars, in bytes. Least-recently-used avatars
+        /// are evicted above it. 0 or less removes the cap. Default 100 MB.
+        /// </summary>
+        public static long PersistentCacheMaxBytes { get; set; } = 100L * 1024 * 1024;
+
+        /// <summary>
+        /// Delete every cached avatar, on disk and in memory. Loads already in progress
+        /// still complete but do not repopulate the cache. Call from the main thread.
+        /// </summary>
+        public static void ClearAvatarCache()
+        {
+            // Under CacheLock so a concurrent commit either lands before the clear
+            // (and is cleared) or sees the new generation (and is dropped).
+            lock (CacheLock)
+            {
+                AvatarDiskCache.Clear(); // advances the cache generation
+                GlbCache.Clear();
+            }
+            lock (InFlightLock)
+            {
+                InFlight.Clear();
             }
         }
 
@@ -101,6 +146,11 @@ namespace AvaTwin
             public string GlbUrl;
             /// <summary>Skin tone hex from server, or null if not provided.</summary>
             public string SkinTone;
+            /// <summary>
+            /// True when the server substituted a default avatar because the app's plan
+            /// is below a piece's tier. GlbUrl then points at the default avatar.
+            /// </summary>
+            public bool PlanFallback;
         }
 
         // ── Resources paths ─────────────────────────────────────────────
@@ -138,6 +188,7 @@ namespace AvaTwin
             public string avatar_id;
             public string url;
             public string skin_tone;
+            public bool plan_fallback;
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -164,29 +215,22 @@ namespace AvaTwin
 
             var resolvedSkinTone = skinToneHex;
 
-            // Check GLB cache first
-            var cachedBytes = GetCachedGlb(avatarId);
-            byte[] glbBytes;
+            // Game-runtime LoadAvatar path: resolve via api_key direct (x-api-key + x-app-id),
+            // bypassing customizer-token-mint so this rendering path does NOT count a session.
+            // Each customizer-open still mints (see OpenCustomizerAsync); only LoadAvatar paths
+            // are token-less.
+            // Concurrent loads of one avatar share a single resolve + download, so that
+            // shared work ignores any one caller's token; each caller stops waiting on its own.
+            var glb = await WithCancellation(AcquireGlbAsync(
+                avatarId,
+                AuthContext(credentials.AppId, baseUrl),
+                () => ResolveAvatarByApiKeyAsync(avatarId, credentials.AppId, credentials.ApiKey, baseUrl),
+                url => DownloadGlbAsync(url)), ct);
+            if (!string.IsNullOrEmpty(glb.SkinTone))
+                resolvedSkinTone = glb.SkinTone;
 
-            if (cachedBytes != null)
-            {
-                glbBytes = cachedBytes;
-            }
-            else
-            {
-                // Game-runtime LoadAvatar path: resolve via api_key direct (x-api-key + x-app-id),
-                // bypassing customizer-token-mint so this rendering path does NOT count a session.
-                // Each customizer-open still mints (see OpenCustomizerAsync); only LoadAvatar paths
-                // are token-less.
-                var resolveResult = await ResolveAvatarByApiKeyAsync(
-                    avatarId, credentials.AppId, credentials.ApiKey, baseUrl, ct);
-                if (!string.IsNullOrEmpty(resolveResult.SkinTone))
-                    resolvedSkinTone = resolveResult.SkinTone;
-                glbBytes = await DownloadGlbAsync(resolveResult.GlbUrl, ct);
-                CacheGlb(avatarId, glbBytes);
-            }
-
-            var root = await InstantiateGlbAsync(glbBytes, ct);
+            var root = await InstantiateGlbAsync(glb.Bytes, ct);
+            await CommitGlbAsync(glb);
             ApplyMaterials(root, resolvedSkinTone);
             ConfigureHumanoid(root);
             return new AvatarResult(root, avatarId, resolvedSkinTone);
@@ -210,30 +254,252 @@ namespace AvaTwin
 
             var resolvedSkinTone = skinToneHex;
 
-            // Check GLB cache first
-            var cachedBytes = GetCachedGlb(avatarId);
-            byte[] glbBytes;
+            // Game-runtime LoadAvatar path: resolve via api_key direct (x-api-key + x-app-id),
+            // bypassing customizer-token-mint so this rendering path does NOT count a session.
+            var glb = await WithCancellation(AcquireGlbAsync(
+                avatarId,
+                AuthContext(appId, baseUrl),
+                () => ResolveAvatarByApiKeyAsync(avatarId, appId, apiKey, baseUrl),
+                url => DownloadGlbAsync(url)), ct);
+            if (!string.IsNullOrEmpty(glb.SkinTone))
+                resolvedSkinTone = glb.SkinTone;
 
-            if (cachedBytes != null)
-            {
-                glbBytes = cachedBytes;
-            }
-            else
-            {
-                // Game-runtime LoadAvatar path: resolve via api_key direct (x-api-key + x-app-id),
-                // bypassing customizer-token-mint so this rendering path does NOT count a session.
-                var resolveResult = await ResolveAvatarByApiKeyAsync(
-                    avatarId, appId, apiKey, baseUrl, ct);
-                if (!string.IsNullOrEmpty(resolveResult.SkinTone))
-                    resolvedSkinTone = resolveResult.SkinTone;
-                glbBytes = await DownloadGlbAsync(resolveResult.GlbUrl, ct);
-                CacheGlb(avatarId, glbBytes);
-            }
-
-            var root = await InstantiateGlbAsync(glbBytes, ct);
+            var root = await InstantiateGlbAsync(glb.Bytes, ct);
+            await CommitGlbAsync(glb);
             ApplyMaterials(root, resolvedSkinTone);
             ConfigureHumanoid(root);
             return new AvatarResult(root, avatarId, resolvedSkinTone);
+        }
+
+        // ── GLB acquisition (memory -> resolve -> disk -> download) ─────
+
+        internal enum GlbSource { Memory, Disk, Network }
+
+        /// <summary>GLB bytes plus what is needed to cache them once they import.</summary>
+        internal sealed class GlbAcquisition
+        {
+            /// <summary>Memory-cache key: authorization context plus avatar id.</summary>
+            public string CacheKey;
+            /// <summary>Cache generation when the load started (see AvatarDiskCache.Generation).</summary>
+            public int Generation;
+            public byte[] Bytes;
+            /// <summary>Server-provided skin tone, or null.</summary>
+            public string SkinTone;
+            /// <summary>Disk cache key of the resolved storage object, or null if not cacheable.</summary>
+            public string AssetKey;
+            public GlbSource Source;
+        }
+
+        private static readonly Dictionary<string, Task<GlbAcquisition>> InFlight = new();
+        private static readonly object InFlightLock = new();
+
+        /// <summary>
+        /// Loads may only share results within one authorization scope (app + endpoint),
+        /// since the server's answer depends on the caller's plan and allowlists.
+        /// </summary>
+        internal static string AuthContext(string appId, string baseUrl)
+        {
+            return $"{appId}|{(baseUrl ?? string.Empty).TrimEnd('/')}";
+        }
+
+        /// <summary>
+        /// GLB bytes for an avatar. A memory hit (same session) returns immediately.
+        /// Otherwise avatar-resolve always runs, so the server's plan and access checks
+        /// apply, and the resolved storage object is read from disk when cached, or
+        /// downloaded. Concurrent calls for one avatar within one authorization context
+        /// share a single resolve + download.
+        /// Call <see cref="CommitGlbAsync"/> after the bytes import successfully.
+        /// </summary>
+        internal static Task<GlbAcquisition> AcquireGlbAsync(
+            string avatarId,
+            string authContext,
+            Func<Task<ResolveResult>> resolve,
+            Func<string, Task<byte[]>> download)
+        {
+            var cacheKey = $"{authContext}\n{avatarId}";
+            var generation = AvatarDiskCache.Generation;
+
+            var cachedBytes = GetCachedGlb(cacheKey);
+            if (cachedBytes != null)
+            {
+                return Task.FromResult(new GlbAcquisition
+                {
+                    CacheKey = cacheKey,
+                    Generation = generation,
+                    Bytes = cachedBytes,
+                    Source = GlbSource.Memory,
+                });
+            }
+
+            lock (InFlightLock)
+            {
+                if (InFlight.TryGetValue(cacheKey, out var pending) && !pending.IsCompleted)
+                    return pending;
+
+                var task = AcquireUncachedAsync(cacheKey, generation, resolve, download);
+                InFlight[cacheKey] = task;
+                task.ContinueWith(_ =>
+                {
+                    lock (InFlightLock)
+                    {
+                        if (InFlight.TryGetValue(cacheKey, out var current) && current == task)
+                            InFlight.Remove(cacheKey);
+                    }
+                }, TaskScheduler.Default);
+                return task;
+            }
+        }
+
+        private static async Task<GlbAcquisition> AcquireUncachedAsync(
+            string cacheKey,
+            int generation,
+            Func<Task<ResolveResult>> resolve,
+            Func<string, Task<byte[]>> download)
+        {
+            var resolveResult = await resolve();
+            var assetKey = PersistentCacheEnabled
+                ? AvatarDiskCache.AssetKeyFromUrl(resolveResult.GlbUrl)
+                : null;
+
+            var diskBytes = await AvatarDiskCache.TryLoadAsync(assetKey);
+            if (diskBytes != null)
+            {
+                return new GlbAcquisition
+                {
+                    CacheKey = cacheKey,
+                    Generation = generation,
+                    Bytes = diskBytes,
+                    SkinTone = resolveResult.SkinTone,
+                    AssetKey = assetKey,
+                    Source = GlbSource.Disk,
+                };
+            }
+
+            return new GlbAcquisition
+            {
+                CacheKey = cacheKey,
+                Generation = generation,
+                Bytes = await download(resolveResult.GlbUrl),
+                SkinTone = resolveResult.SkinTone,
+                AssetKey = assetKey,
+                Source = GlbSource.Network,
+            };
+        }
+
+        /// <summary>
+        /// Cache bytes that imported successfully: in memory for this session and, for
+        /// a fresh download, on disk. Bytes that failed to import are never cached.
+        /// </summary>
+        internal static Task CommitGlbAsync(GlbAcquisition glb)
+        {
+            if (glb == null || glb.Source == GlbSource.Memory)
+                return Task.CompletedTask;
+
+            lock (CacheLock)
+            {
+                // The cache was cleared while this load was in progress.
+                if (glb.Generation != AvatarDiskCache.Generation)
+                    return Task.CompletedTask;
+
+                // Concurrent callers share one acquisition; only the first commit persists it.
+                if (!CacheGlb(glb.CacheKey, glb.Bytes))
+                    return Task.CompletedTask;
+            }
+
+            if (glb.Source != GlbSource.Network)
+                return Task.CompletedTask;
+
+            if (!PersistentCacheEnabled || glb.AssetKey == null)
+                return Task.CompletedTask;
+
+            return AvatarDiskCache.SaveAsync(glb.AssetKey, glb.Bytes, PersistentCacheMaxBytes, glb.Generation);
+        }
+
+        /// <summary>
+        /// Asks Storage to verify a signed GLB URL (signature, object and expiry) without
+        /// downloading the object. Returns the object's byte length when accepted (-1 if the
+        /// length is not reported), or null when rejected or unreachable. Replaceable in tests.
+        /// </summary>
+        internal static Func<string, Task<long?>> VerifyStorageUrlAsync = VerifyWithStorageAsync;
+
+        /// <summary>
+        /// Cached bytes for a GLB URL that did not come from this process's own resolve
+        /// (e.g. CharacterLoader). The client cannot check a token's signature, so a disk hit
+        /// is used only after Storage accepts the URL and reports a matching length.
+        /// </summary>
+        internal static async Task<byte[]> TryLoadVerifiedAsync(string url)
+        {
+            var assetKey = PersistentCacheEnabled ? AvatarDiskCache.AssetKeyFromUrl(url) : null;
+            if (assetKey == null) return null;
+
+            var cached = await AvatarDiskCache.TryLoadAsync(assetKey);
+            if (cached == null) return null;
+
+            var verifiedLength = await VerifyStorageUrlAsync(url);
+            if (verifiedLength == null) return null;
+            if (verifiedLength.Value >= 0 && verifiedLength.Value != cached.LongLength) return null;
+            return cached;
+        }
+
+        private static async Task<long?> VerifyWithStorageAsync(string url)
+        {
+            try
+            {
+                using (var head = UnityWebRequest.Head(url))
+                {
+                    await SendAsync(head);
+                    if (head.responseCode == 200)
+                        return ParseLength(head.GetResponseHeader("Content-Length"));
+                    if (head.responseCode != 405 && head.responseCode != 501)
+                        return null;
+                }
+
+                // HEAD not allowed: a one-byte range request is verified the same way.
+                using (var probe = UnityWebRequest.Get(url))
+                {
+                    probe.SetRequestHeader("Range", "bytes=0-0");
+                    await SendAsync(probe);
+                    if (probe.responseCode == 206)
+                    {
+                        var range = probe.GetResponseHeader("Content-Range"); // "bytes 0-0/<total>"
+                        var slash = range?.LastIndexOf('/') ?? -1;
+                        return slash >= 0 ? ParseLength(range.Substring(slash + 1)) : -1;
+                    }
+                    if (probe.responseCode == 200)
+                        return probe.downloadHandler?.data?.LongLength ?? -1;
+                    return null;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static long ParseLength(string value)
+        {
+            return long.TryParse(value, out var length) && length >= 0 ? length : -1;
+        }
+
+        private static async Task SendAsync(UnityWebRequest request)
+        {
+            var op = request.SendWebRequest();
+            while (!op.isDone)
+                await Task.Yield();
+        }
+
+        private static async Task<T> WithCancellation<T>(Task<T> task, CancellationToken ct)
+        {
+            if (!ct.CanBeCanceled || task.IsCompleted)
+                return await task;
+
+            var cancelled = new TaskCompletionSource<bool>();
+            using (ct.Register(() => cancelled.TrySetResult(true)))
+            {
+                if (await Task.WhenAny(task, cancelled.Task) != task)
+                    throw new OperationCanceledException(ct);
+            }
+            return await task;
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -369,7 +635,8 @@ namespace AvaTwin
                 return new ResolveResult
                 {
                     GlbUrl = resp.url,
-                    SkinTone = string.IsNullOrEmpty(resp.skin_tone) ? null : resp.skin_tone
+                    SkinTone = string.IsNullOrEmpty(resp.skin_tone) ? null : resp.skin_tone,
+                    PlanFallback = resp.plan_fallback
                 };
             }
         }
@@ -440,7 +707,8 @@ namespace AvaTwin
                 return new ResolveResult
                 {
                     GlbUrl = resp.url,
-                    SkinTone = string.IsNullOrEmpty(resp.skin_tone) ? null : resp.skin_tone
+                    SkinTone = string.IsNullOrEmpty(resp.skin_tone) ? null : resp.skin_tone,
+                    PlanFallback = resp.plan_fallback
                 };
             }
         }
