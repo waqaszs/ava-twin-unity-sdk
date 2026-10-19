@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-20
+
+1.2.0 was an internal test candidate and was not released.
+
+### Added
+- Avatars are cached on the device across app launches on Android, iOS, WebGL and the Editor.
+  `SDK.LoadAvatar` and the web and native mobile customizer (`CharacterLoader`) reuse a cached
+  GLB instead of downloading it again. The server still resolves every load, so plan, origin and
+  bundle checks keep applying. A URL that did not come from the SDK's own resolve (for example
+  one received from another player) reuses the cache only after Storage verifies it.
+- `AvatarPipeline.PersistentCacheEnabled` (default `true`), `AvatarPipeline.PersistentCacheMaxBytes`
+  (default 100 MB, least-recently-used eviction) and `AvatarPipeline.ClearAvatarCache()`.
+- `AvatarPipeline.ResolveResult.PlanFallback` reports when the server substituted a default avatar.
+
+### Improved
+- Concurrent loads of the same avatar share one resolve and one download.
+- Cached files are validated (length, SHA-256, GLB header) on every read; a damaged file is
+  discarded and downloaded again. Only GLBs that imported successfully are cached.
+- WebGL flushes the cache to IndexedDB after writes, so it survives page reloads.
+
+### Fixed
+- The Welcome window reported v1.0.0 and offered a false update on v1.1.0. It now reads the
+  installed package version and compares versions numerically.
+
+### Compatibility
+- No breaking API change. `CharacterLoader`'s TTL settings now apply only to non-Ava-Twin URLs.
+
 ## [1.1.0] - 2026-09-06
 
 ### Added
